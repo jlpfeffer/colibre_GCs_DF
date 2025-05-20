@@ -57,8 +57,8 @@ def eccentricity(do_stars, pos, vel, const_G, rsort, menc, potential_outer):
 
   GMr = const_G * menc / (rsort + sys.float_info.min)
 
-  epsilon = np.zeros(len(do_stars))
-  rcirc = np.zeros(len(do_stars))
+  epsilon = np.zeros(len(do_stars), dtype=vel.dtype)
+  rcirc = np.zeros(len(do_stars), dtype=vel.dtype)
 
   for j in range(len(do_stars)):
     if not do_stars[j]: continue
@@ -453,13 +453,15 @@ def get_removed_clusters(snapshot, args, numthreads):
       return
 
     # Allocate space for subhalo particle properties
-    SH_type = np.zeros(Nbound, dtype=int)
-    SH_masses = np.zeros(Nbound)
-    SH_pos = np.zeros((Nbound, 3))
-    SH_vel = np.zeros((Ntype[iDM]+Ntype[istar], 3))
-    SH_Star_IDs = np.array([], dtype=int)
+    SH_type = np.zeros(Nbound, dtype=np.int8)
+    SH_masses = np.zeros(Nbound, dtype=snapshot['PartType4/Masses'].dtype)
+    SH_pos = np.zeros((Nbound, 3),
+                      dtype=snapshot['PartType4/Coordinates'].dtype)
+    SH_vel = np.zeros((Ntype[iDM]+Ntype[istar], 3),
+                      dtype=snapshot['PartType4/Velocities'].dtype)
+    SH_Star_IDs = np.array([], dtype=snapshot['PartType4/ParticleIDs'].dtype)
     if snapPotentials:
-      SH_pots = np.zeros(Nbound)
+      SH_pots = np.zeros(Nbound, dtype=snapshot['PartType4/Potentials'].dtype)
 
     thalo_reproc += time.time() - start
 
@@ -479,7 +481,7 @@ def get_removed_clusters(snapshot, args, numthreads):
         _, p_ind, sub_ind = np.intersect1d(All_IDs[ptype], subparts[isub],
             assume_unique=True, return_indices=True)
 
-        SH_type[upto:upto+Ntype[ipart]] = ipart * np.ones(Ntype[ipart], dtype=int)
+        SH_type[upto:upto+Ntype[ipart]] = ipart * np.ones(Ntype[ipart], dtype=np.int8)
         SH_masses[upto:upto+Ntype[ipart]] = All_masses[ptype][p_ind]
         SH_pos[upto:upto+Ntype[ipart]] = All_pos[ptype][p_ind]
         if snapPotentials:
@@ -523,7 +525,7 @@ def get_removed_clusters(snapshot, args, numthreads):
         else:
           MassType = 'Masses'
  
-        SH_type[upto:upto+Ntype[ipart]] = ipart * np.ones(Ntype[ipart], dtype=int)
+        SH_type[upto:upto+Ntype[ipart]] = ipart * np.ones(Ntype[ipart], dtype=np.int8)
         SH_masses[upto:upto+Ntype[ipart]] = \
             load_physical_data(group, MassType, ascale, p_ind)
         SH_pos[upto:upto+Ntype[ipart]] = \
@@ -598,7 +600,7 @@ def get_removed_clusters(snapshot, args, numthreads):
     start = time.time()
  
     # Enclosed mass
-    menc = np.zeros(len(SH_masses))
+    menc = np.zeros(len(SH_masses), dtype=SH_masses.dtype)
     menc[0] = 0.
     for i in range(1, len(menc)):
       menc[i] = menc[i-1] + SH_masses[i]
@@ -651,7 +653,7 @@ def get_removed_clusters(snapshot, args, numthreads):
  
     # Outer component of potential, assuming spherical symmetry
     # -G int_r^inf dM(r')/r'
-    potential_outer = np.zeros(len(SH_masses))
+    potential_outer = np.zeros(len(SH_masses), dtype=SH_masses.dtype)
     for i in range(len(SH_masses)-2,-1,-1):
       potential_outer[i] = \
           potential_outer[i+1] - const_G * SH_masses[i+1] / SH_radii[i+1]
@@ -754,7 +756,7 @@ def get_removed_clusters(snapshot, args, numthreads):
   # Assumes particle has been in the same halo the whole time. DF time will
   # generally significantly increase if the host galaxy is accreted, so should
   # mainly only affect the in situ GCs
-  GC_ages = (np.ones(gc_shape).T * np.array(Stars_Ages)).T
+  GC_ages = (np.ones(gc_shape, dtype=Stars_Ages.dtype).T * np.array(Stars_Ages)).T
 
   df_mask = (clusters['tfric'] < GC_ages)
   clusters['removed'][df_mask] = 1
