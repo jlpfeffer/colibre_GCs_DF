@@ -220,6 +220,7 @@ def get_removed_clusters(snapshot, args, numthreads):
 
   iDM = itypes['DM']
   istar = itypes['Stars']
+  iBH = itypes['BH']
 
   # If there's no stars yet we can stop here
   if (snapshot['Header'].attrs['NumPart_Total'][istar] == 0):
@@ -280,7 +281,7 @@ def get_removed_clusters(snapshot, args, numthreads):
 
   ##### Load snapshot particle data #####
 
-  stars_in_haloes = group['HaloCatalogueIndex'][:] >= 0
+  stars_in_haloes = snapshot[f'PartType{istar}/HaloCatalogueIndex'][:] >= 0
 
   if not stars_in_haloes.any():
     return clusters
@@ -395,6 +396,9 @@ def get_removed_clusters(snapshot, args, numthreads):
   current, peak = tracemalloc.get_traced_memory()
   print(f'Current memory usage: {current/1024.**3:.5g} GB')
 
+  print(f'{len(subhaloes)} haloes to process')
+  sys.stdout.flush()
+
 
   timing_haloes = np.zeros(len(subhaloes), dtype=np.float32)
 
@@ -427,11 +431,13 @@ def get_removed_clusters(snapshot, args, numthreads):
     SH_masses = np.zeros(Nbound, dtype=snapshot['PartType4/Masses'].dtype)
     SH_pos = np.zeros((Nbound, 3),
                       dtype=snapshot['PartType4/Coordinates'].dtype)
-    SH_vel = np.zeros((Ntype[iDM]+Ntype[istar], 3),
+    SH_vel = np.zeros((Ntype[iDM]+Ntype[istar]+Ntype[iBH], 3),
                       dtype=snapshot['PartType4/Velocities'].dtype)
+    #SH_IDs = np.zeros(Nbound, dtype=snapshot['PartType4/ParticleIDs'].dtype)
     #SH_Star_IDs = np.array([], dtype=snapshot['PartType4/ParticleIDs'].dtype)
     if snapPotentials:
-      SH_pots = np.zeros(Nbound, dtype=snapshot['PartType4/Potentials'].dtype)
+      SH_pots = np.zeros(Ntype[iDM]+Ntype[istar]+Ntype[iBH],
+                         dtype=snapshot['PartType4/Potentials'].dtype)
 
     thalo_reproc += time.time() - start
 
@@ -453,9 +459,10 @@ def get_removed_clusters(snapshot, args, numthreads):
         SH_masses[upto:upto+Ntype[ipart]] = Bound_masses[ptype][mask]
         SH_pos[upto:upto+Ntype[ipart]] = Bound_pos[ptype][mask]
         if snapPotentials:
-          SH_pots[upto:upto+Ntype[ipart]] = Bound_pots[ptype][mask]
+          if 'Potentials' in group and ptype in ['DM', 'Stars', 'BH']:
+            SH_pots[upto_vel:upto_vel+Ntype[ipart]] = Bound_pots[ptype][mask]
 
-        if ptype in ['DM', 'Stars']:
+        if ptype in ['DM', 'Stars', 'BH']:
           SH_vel[upto_vel:upto_vel+Ntype[ipart]] = \
               All_vel[ptype][mask]
           upto_vel += Ntype[ipart]
@@ -492,21 +499,24 @@ def get_removed_clusters(snapshot, args, numthreads):
           MassType = 'Masses'
  
         SH_type[upto:upto+Ntype[ipart]] = ipart * np.ones(Ntype[ipart], dtype=np.int8)
+        #SH_IDs[upto:upto+Ntype[ipart]] = group['ParticleIDs'][p_ind]
         SH_masses[upto:upto+Ntype[ipart]] = \
             load_physical_data(group, MassType, ascale, p_ind)
         SH_pos[upto:upto+Ntype[ipart]] = \
             load_physical_data(group, 'Coordinates', ascale, p_ind)
         if snapPotentials:
-          SH_pots[upto:upto+Ntype[ipart]] = \
-              load_physical_data(group, 'Potentials', ascale, p_ind)
+          if 'Potentials' in group and ptype in ['DM', 'Stars', 'BH']:
+            SH_pots[upto_vel:upto_vel+Ntype[ipart]] = \
+                load_physical_data(group, 'Potentials', ascale, p_ind)
  
-        if ptype in ['DM', 'Stars']:
+        if ptype in ['DM', 'Stars', 'BH']:
           SH_vel[upto_vel:upto_vel+Ntype[ipart]] = \
               load_physical_data(group, 'Velocities', ascale, p_ind)
           upto_vel += Ntype[ipart]
 
         if ptype == 'Stars':
           #SH_Star_IDs = np.array(All_IDs[ipart][p_ind], copy=True)
+          #SH_Star_IDs = SH_IDs[upto:upto+Ntype[ipart]]
           GCs_Masses = load_physical_data(group, 'GCs_Masses', ascale, p_ind)
 
         upto += Ntype[ipart]
@@ -515,20 +525,16 @@ def get_removed_clusters(snapshot, args, numthreads):
 
       thalo_io += time.time() - start
  
+    # Does this subhalo have any clusters?
+    if not (GCs_Masses > 0).any(): return
+
     start = time.time()
 
-    # Mask to bound particles arrays
-    s_mask = Stars_HaloIndex == HaloIdx
-    s_ind = np.arange(len(Stars_HaloIndex))[s_mask]
- 
     # Location in full snapshot array
-    s_ind_all = Stars_SnapIndex[s_mask]
+    s_ind_all = Stars_SnapIndex[Stars_HaloIndex == HaloIdx]
 
     #clusters['dfTrackId'][s_ind] = subhaloes['TrackId'][isub]
  
-    # Does this subhalo have any clusters?
-    if (GCs_Masses[s_mask] > 0).any(): return
-
     if snapPotentials:
       # Use particle snapshot potentials for centre of potential
       cofp = SH_pos[ SH_pots.argmin() ]
@@ -540,6 +546,8 @@ def get_removed_clusters(snapshot, args, numthreads):
       #cofv = subhaloes['PhysicalMostBoundVelocity'][isub]
       printf('Not yet implemented')
       exit(1)
+
+    del SH_pots
  
     # centre positions and velocities on subhalo centre of potential
     SH_pos = centre_periodic_positions(SH_pos, cofp, boxsize)
@@ -559,7 +567,7 @@ def get_removed_clusters(snapshot, args, numthreads):
     # a DM-dominated system
  
     # Particles with velocities first
-    vel_mask = np.bitwise_or(SH_type == iDM, SH_type == istar)
+    vel_mask = np.bitwise_or(SH_type == iDM, SH_type == istar, SH_type == iBH)
     SH_radii_vel = SH_radii[vel_mask]
     sortIdx = SH_radii_vel.argsort()
     SH_radii_vel = SH_radii_vel[sortIdx]
@@ -572,7 +580,14 @@ def get_removed_clusters(snapshot, args, numthreads):
     SH_masses = SH_masses[sortIdx]
     SH_type = SH_type[sortIdx]
     SH_pos = SH_pos[sortIdx]
- 
+    #SH_IDs = SH_IDs[sortIdx]
+
+    sortIdx = s_radii.argsort()
+    GCs_Masses = GCs_Masses[sortIdx]
+    s_ind_all = s_ind_all[sortIdx]
+    s_radii = s_radii[sortIdx]
+    #SH_Star_IDs = SH_Star_IDs[sortIdx]
+
     thalo_reproc += time.time() - start
     start = time.time()
  
@@ -584,7 +599,7 @@ def get_removed_clusters(snapshot, args, numthreads):
  
     # Approx. upper limit to the distance a cluster can inspiral from
     # Used to limit to calculations worth doing
-    Mtest = 1.1 * np.max(GCs_Masses[s_mask])
+    Mtest = 1.1 * np.max(GCs_Masses)
     Rmax = SH_radii[-1]
     n = len(menc)
     dn = max(1, int(n/100)) # check up to ~100 radii
@@ -600,6 +615,8 @@ def get_removed_clusters(snapshot, args, numthreads):
         Rmax = SH_radii[i]
         break
 
+    print(f"{isub} Rmax={Rmax} Mmax={Mtest/1.1}") #TODO
+
     thalo_menc += time.time() - start
     start = time.time()
  
@@ -611,16 +628,19 @@ def get_removed_clusters(snapshot, args, numthreads):
       if s_radii[i] > Rmax: continue
  
       # Does this particle have any clusters?
-      if np.sum(GCs_Masses[s_ind[i]]) == 0: continue
+      if not (GCs_Masses[i] > 0).any(): continue
  
       if s_radii[i] == 0:
         # Can stop here. t_df = 0 for r = 0
         for j in range( gc_shape[1] ):
-          if GCs_Masses[s_ind[i],j] > 0:
+          if GCs_Masses[i,j] > 0:
             clusters['tfric'][s_ind_all[i], j] = 0.
 
       else:
         do_stars[i] = True
+
+    print(f"{isub} sum(do_stars)={np.sum(do_stars)}, too far={np.sum(s_radii > Rmax)}") #TODO
+    sys.stdout.flush()
  
     thalo_reproc += time.time() - start
     start = time.time()
@@ -682,7 +702,7 @@ def get_removed_clusters(snapshot, args, numthreads):
             rcirc[i], SH_radii_vel, SH_vel)
  
       # Do all clusters of this particle
-      part_GC_masses = GCs_Masses[s_ind[i]]
+      part_GC_masses = GCs_Masses[i]
       for j in range( gc_shape[1] ):
         if part_GC_masses[j] <= 0: continue
 
@@ -712,6 +732,7 @@ def get_removed_clusters(snapshot, args, numthreads):
   #submask = subhaloes['NboundType'][:,istar] > 0
   #nsort = subhaloes['Nbound'][submask].argsort()[::-1]
   #do_halo = np.arange(len(subhaloes))[submask][nsort]
+  do_halo = np.arange(len(subhaloes))
 
   print('Running DF...')
   sys.stdout.flush()
