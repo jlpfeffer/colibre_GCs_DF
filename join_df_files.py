@@ -55,13 +55,17 @@ if __name__=='__main__':
           f_prev.close()
           continue
 
+    has_TrackId = False
+
     ParticleIDs_prev = f_prev['/PartType4/ParticleIDs'][:]
     Removed_prev = f_prev['/PartType4/GCs_DF_Removed'][:]
     SnapnumRemoved_prev = f_prev['/PartType4/GCs_DF_SnapnumRemoved'][:]
     Timescale_prev = f_prev['/PartType4/GCs_DF_Timescale'][:]
     AgeRemoved_prev = f_prev['/PartType4/GCs_DF_AgeRemoved'][:]
     MassRemoved_prev = f_prev['/PartType4/GCs_DF_MassRemoved'][:]
-    TrackId_prev = f_prev['/PartType4/GCs_DF_TrackId'][:]
+    if '/PartType4/GCs_DF_TrackId' in f_prev:
+      TrackId_prev = f_prev['/PartType4/GCs_DF_TrackId'][:]
+      has_TrackId = True
     f_prev.close()
 
     # The current snapshot, which we'll update in place
@@ -72,7 +76,8 @@ if __name__=='__main__':
     Timescale = f['/PartType4/GCs_DF_Timescale'][:]
     AgeRemoved = f['/PartType4/GCs_DF_AgeRemoved'][:]
     MassRemoved = f['/PartType4/GCs_DF_MassRemoved'][:]
-    TrackId = f['/PartType4/GCs_DF_TrackId'][:]
+    if has_TrackId:
+      TrackId = f['/PartType4/GCs_DF_TrackId'][:]
 
     print('  removed prev',np.sum(Removed_prev))
     print('  removed',np.sum(Removed))
@@ -100,7 +105,8 @@ if __name__=='__main__':
           Timescale[new_i,j] = Timescale_prev[prev_i,j]
           AgeRemoved[new_i,j] = AgeRemoved_prev[prev_i,j]
           MassRemoved[new_i,j] = MassRemoved_prev[prev_i,j]
-          TrackId[new_i,j] = TrackId_prev[prev_i,j]
+          if has_TrackId:
+            TrackId[new_i,j] = TrackId_prev[prev_i,j]
  
     # write back to hdf5 file
     dataset = f['/PartType4/ParticleIDs']
@@ -121,8 +127,9 @@ if __name__=='__main__':
     dataset = f['/PartType4/GCs_DF_MassRemoved']
     dataset[...] = MassRemoved
  
-    dataset = f['/PartType4/GCs_DF_TrackId']
-    dataset[...] = TrackId
+    if has_TrackId:
+      dataset = f['/PartType4/GCs_DF_TrackId']
+      dataset[...] = TrackId
  
     f.close()
 
