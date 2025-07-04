@@ -387,6 +387,11 @@ def get_removed_clusters(snapshot, args, numthreads):
 
   del stars_in_haloes
 
+  with h5py.File(soap_catalogue, 'r') as f:
+    soap_halo_index = np.array(f['InputHalos/HaloCatalogueIndex'])
+    soap_cop = np.array(f['InputHalos/HaloCentre']) * ascale
+    soap_com_v = np.array(f['BoundSubhalo/CentreOfMassVelocity']) # Velocities stored in physical units
+
   # Create subhalo list
   unique_haloes = np.unique(Stars_HaloIndex)
   subhaloes = []
@@ -399,6 +404,8 @@ def get_removed_clusters(snapshot, args, numthreads):
     subhaloes.append({})
 
     subhaloes[-1]['HaloCatalogueIndex'] = haloIdx
+    subhaloes[-1]['CentreOfPotential'] = soap_cop[soap_halo_index==haloIdx]
+    subhaloes[-1]['CentreOfMassVelocity'] = soap_com_v[soap_halo_index==haloIdx]
 
     NboundType = np.zeros(len(PartTypeNames), dtype=int)
     for ptype in ['Gas', 'DM', 'Stars', 'BH']:
@@ -591,12 +598,22 @@ def get_removed_clusters(snapshot, args, numthreads):
       # Use particle snapshot potentials for centre of potential
       cofp = SH_pos[ SH_pots.argmin() ]
       cofv = SH_vel[ SH_pots.argmin() ]
+
+      print("COP from particle potentials: ",cofp)
+      print("COP velocity from particle potentials: ",cofv)
+
+      cofp = subhaloes[isub]['CentreOfPotential']
+      cofv = subhaloes[isub]['CentreOfMassVelocity']
+
+      print("COP from SOAP: ", cofp)
+      print("COM velocity from SOAP: ", cofv)
+
     else:
       #TODO
       # Use subhalo catalogue for centres
       #cofp = subhaloes['ComovingMostBoundPosition'][isub] * ascale
       #cofv = subhaloes['PhysicalMostBoundVelocity'][isub]
-      printf('Not yet implemented')
+      print('Not yet implemented')
       exit(1)
 
     del SH_pots
@@ -1083,6 +1100,8 @@ if __name__ == "__main__":
   #  snapfile = f'{args.path}/{args.basename}_{args.snapnum:04}.hdf5'
 
   snapfile = f"{args.path}/SOAP/colibre_with_SOAP_membership_{args.snapnum:04}.hdf5"
+
+  soap_catalogue = f"{args.path}/SOAP/halo_properties_{args.snapnum:04}.hdf5"
 
   print('Loading snapshot from', snapfile)
   sys.stdout.flush()
