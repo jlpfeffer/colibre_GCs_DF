@@ -174,13 +174,12 @@ def get_df_timescale(Mgal, Mcl, r, epsilon, velStdv, const_G):
 
   return alpha * f_e * velStdv * r**2 / (const_G * Mcl * np.log(Lambda))
 
-def get_removed_clusters(snapshot, args, numthreads):
+def get_removed_clusters(args, numthreads):
   '''
   Calculate dynamical friction properties and list of removed clusters
 
   Parameters
   ----------
-  snapshot : HDF5 snapshot file
   args : argparse Namespace
   numthreads : Number of threads for thread pool
 
@@ -189,14 +188,13 @@ def get_removed_clusters(snapshot, args, numthreads):
   clusters : Dictionary containing dynamical friction properties for GCs
   '''
 
-  SnapshotPath = args.path
-  SnapshotFileBase = args.basename
-  SubhaloPath = args.subpath
   snapnum = args.snapnum
-  loadall = args.loadall
-  #snapPotentials = args.snapPotentials
-  snapPotentials = True
+  loadall = not args.partload
+  snapPotentials = args.snapPotentials
   eccNbaryon = args.eccNbaryon
+
+  snapfile = f"{args.path}/SOAP/{args.basename}_with_SOAP_membership_{args.snapnum:04}.hdf5"
+  snapshot = h5py.File(snapfile, 'r')
 
   # Set up a dictionary for the cluster properties
   #   removed: Were GCs removed by dynamical friction?
@@ -204,14 +202,14 @@ def get_removed_clusters(snapshot, args, numthreads):
   #   tfric: Dynamical friction timescale for each GC
   #   ageRemoved: Age at which GCs were removed
   #   massRemoved: Mass at which GCs were removed
-  #   dfTrackId: HBT track ID in which GC resides
+  #   TrackId: HBT track ID in which GC resides
   clusters = {}
   clusters['tfric'] = np.array([])
   clusters['removed'] = np.array([], dtype=int)
   clusters['snapNumRemoved'] = np.array([], dtype=int)
   clusters['ageRemoved'] = np.array([])
   clusters['massRemoved'] = np.array([])
-  #clusters['dfTrackId'] = np.array([], dtype=int)
+  clusters['TrackId'] = np.array([], dtype=int)
   
   itypes = {}
   PartTypeNames = snapshot['Header/PartTypeNames'][:]
@@ -230,7 +228,14 @@ def get_removed_clusters(snapshot, args, numthreads):
   # If there's no stars yet we can stop here
   if (snapshot['Header'].attrs['NumPart_Total'][istar] == 0):
     print('No stars in snapshot')
+    snapshot.close()
     return clusters
+
+  mass_dtype = snapshot['PartType4/Masses'].dtype
+  pos_dtype = snapshot['PartType4/Coordinates'].dtype
+  vel_dtype = snapshot['PartType4/Velocities'].dtype
+  pot_dtype = snapshot['PartType4/Potentials'].dtype
+  ids_dtype = snapshot['PartType4/ParticleIDs'].dtype
 
   timing = {}
   timing['I/O'] = 0.
@@ -259,30 +264,44 @@ def get_removed_clusters(snapshot, args, numthreads):
   clusters['snapNumRemoved'] = -1 * np.ones(gc_shape, dtype=np.int16)
   clusters['ageRemoved'] = -1. * np.ones(gc_shape, dtype=np.float32)
   clusters['massRemoved'] = -1. * np.ones(gc_shape, dtype=np.float32)
-  #clusters['dfTrackId'] = np.zeros(gc_shape, dtype=np.int32)
+  clusters['TrackId'] = np.zeros(gc_shape, dtype=np.int32)
 
   # Maximum inspiral time. Conservatively, twice the age of universe
   Tmax = 2. * simTime
 
-  ## Get the subhaloes
-  #print('Loading subhaloes from', SubhaloPath)
-  #sys.stdout.flush()
-  #hbt = HBTReader(SubhaloPath)
-  #subhaloes = hbt.LoadSubhalos(snapnum)
+  # Get the subhaloes
+  soap_catalogue = f"{args.path}/SOAP/halo_properties_{args.snapnum:04}.hdf5"
+  print('Loading haloes from', soap_catalogue)
+  sys.stdout.flush()
 
-  ## Nothing to do if there's no bound subhaloes or subhaloes with stars
-  #if len(subhaloes) > 0:
-  #  Nhaloes = np.sum(subhaloes['NboundType'][:,istar] > 0)
-  #else:
-  #  Nhaloes = len(subhaloes)
-  #print(f'{Nhaloes} haloes to process')
-  #sys.stdout.flush()
-  #if Nhaloes == 0:
-  #  return clusters
+  subhaloes = {}
+  with h5py.File(soap_catalogue, 'r') as f:
+    subhaloes['HaloCatalogueIndex'] = np.array(f['InputHalos/HaloCatalogueIndex'])
+    subhaloes['TrackId'] = np.array(f['InputHalos/HBTplus/TrackId'])
+    subhaloes['Nbound'] = np.array(f['InputHalos/NumberOfBoundParticles'])
 
-  # Load subhalo particles
-  #subparts = hbt.LoadParticles(snapnum)
+    subhaloes['NboundType'] = np.zeros((len(subhaloes['Nbound']), len(PartTypeNames)), dtype=int)
+    subhaloes['NboundType'][:, itypes['Gas']] = np.array(f['BoundSubhalo/NumberOfGasParticles'])
+    subhaloes['NboundType'][:, itypes['DM']] = np.array(f['BoundSubhalo/NumberOfDarkMatterParticles'])
+    subhaloes['NboundType'][:, itypes['Stars']] = np.array(f['BoundSubhalo/NumberOfStarParticles'])
+    subhaloes['NboundType'][:, itypes['BH']] = np.array(f['BoundSubhalo/NumberOfBlackHoleParticles'])
 
+    subhaloes['CentreOfPotential'] = np.array(f['InputHalos/HaloCentre']) * ascale
+
+    # Velocities stored in physical units 
+    subhaloes['CentreOfMassVelocity'] = np.array(f['BoundSubhalo/CentreOfMassVelocity'])
+
+  # Nothing to do if there's no bound subhaloes or subhaloes with stars
+  if len(subhaloes['HaloCatalogueIndex']) > 0:
+    Nhaloes = np.sum(subhaloes['NboundType'][:,istar] > 0)
+  else:
+    Nhaloes = 0
+
+  print(f'{Nhaloes} in SOAP with stars')
+  sys.stdout.flush()
+  if Nhaloes == 0:
+    snapshot.close()
+    return clusters
 
   ##### Load snapshot particle data #####
 
@@ -290,6 +309,7 @@ def get_removed_clusters(snapshot, args, numthreads):
   has_gcs = snapshot[f'PartType{istar}/GCs_NumberOfClusters'][:] > 0
 
   if not stars_in_haloes.any() or not has_gcs.any():
+    snapshot.close()
     return clusters
 
   print('Loading particle halo IDs')
@@ -300,11 +320,6 @@ def get_removed_clusters(snapshot, args, numthreads):
   for ptype in ['Gas', 'DM', 'Stars', 'BH']:
     ipart = itypes[ptype]
     All_HaloIndex[ptype] = snapshot[f'PartType{ipart}/HaloCatalogueIndex'][:]
-
-  Nhaloes = len(np.unique(All_HaloIndex['Stars'][stars_in_haloes]))
-  print(f'{Nhaloes} subhaloes to process')
-  sys.stdout.flush()
-
 
   if loadall:
     # Load all particles at once
@@ -380,6 +395,8 @@ def get_removed_clusters(snapshot, args, numthreads):
 
     Stars_HaloIndex = Bound_HaloIndex['Stars']
 
+  snapshot.close()
+
   # Location of stars in full snapshot array
   Stars_SnapIndex = np.arange(len(stars_in_haloes))[stars_in_haloes]
 
@@ -387,42 +404,20 @@ def get_removed_clusters(snapshot, args, numthreads):
 
   del stars_in_haloes
 
-  with h5py.File(soap_catalogue, 'r') as f:
-    soap_halo_index = np.array(f['InputHalos/HaloCatalogueIndex'])
-    soap_cop = np.array(f['InputHalos/HaloCentre']) * ascale
-    soap_com_v = np.array(f['BoundSubhalo/CentreOfMassVelocity']) # Velocities stored in physical units
-
-  # Create subhalo list
+  # Number of GCs in each subhalo
   unique_haloes = np.unique(Stars_HaloIndex)
-  subhaloes = []
-  for i, haloIdx in enumerate(unique_haloes):
+  subhaloes['Ngcs'] = np.zeros(len(subhaloes['Nbound']), dtype=int)
+  for haloIdx in unique_haloes:
 
     # Only subhaloes with GCs
     Ngcs = np.sum(has_gcs[Bound_HaloIndex['Stars'] == haloIdx])
     if Ngcs == 0: continue
 
-    subhaloes.append({})
-
-    subhaloes[-1]['HaloCatalogueIndex'] = haloIdx
-    subhaloes[-1]['CentreOfPotential'] = soap_cop[soap_halo_index==haloIdx]
-    subhaloes[-1]['CentreOfMassVelocity'] = soap_com_v[soap_halo_index==haloIdx]
-
-    NboundType = np.zeros(len(PartTypeNames), dtype=int)
-    for ptype in ['Gas', 'DM', 'Stars', 'BH']:
-      ipart = itypes[ptype]
-      if Ntype[ipart] == 0:
-        NboundType[ipart] = 0
-      else:
-        NboundType[ipart] = np.sum(Bound_HaloIndex[ptype] == haloIdx)
-
-    subhaloes[-1]['Nbound'] = np.sum(NboundType)
-    subhaloes[-1]['NboundType'] = np.array(NboundType, copy=True)
-
-    subhaloes[-1]['Ngcs'] = Ngcs
+    subhaloes['Ngcs'][ subhaloes['HaloCatalogueIndex'] == haloIdx ] = Ngcs
 
   del has_gcs
 
-  Nhaloes = len(subhaloes)
+  Nhaloes = np.sum(subhaloes['Ngcs'] > 0)
   print(f"{Nhaloes} subhaloes with GCs")
 
   timing['I/O'] += (time.time() - start) / 60.
@@ -450,9 +445,9 @@ def get_removed_clusters(snapshot, args, numthreads):
     thalo_ecc = 0.
     thalo_df = 0.
 
-    HaloIdx = subhaloes[isub]['HaloCatalogueIndex']
-    Nbound = subhaloes[isub]['Nbound']
-    Ntype = subhaloes[isub]['NboundType']
+    HaloIdx = subhaloes['HaloCatalogueIndex'][isub]
+    Nbound = subhaloes['Nbound'][isub]
+    Ntype = subhaloes['NboundType'][isub]
     Nstar = Ntype[istar]
 
     # Only resolved haloes with stars
@@ -461,16 +456,13 @@ def get_removed_clusters(snapshot, args, numthreads):
 
     # Allocate space for subhalo particle properties
     SH_type = np.zeros(Nbound, dtype=np.int8)
-    SH_masses = np.zeros(Nbound, dtype=snapshot['PartType4/Masses'].dtype)
-    SH_pos = np.zeros((Nbound, 3),
-                      dtype=snapshot['PartType4/Coordinates'].dtype)
-    SH_vel = np.zeros((Ntype[iDM]+Ntype[istar]+Ntype[iBH], 3),
-                      dtype=snapshot['PartType4/Velocities'].dtype)
-    #SH_IDs = np.zeros(Nbound, dtype=snapshot['PartType4/ParticleIDs'].dtype)
-    #SH_Star_IDs = np.array([], dtype=snapshot['PartType4/ParticleIDs'].dtype)
+    SH_masses = np.zeros(Nbound, dtype=mass_dtype)
+    SH_pos = np.zeros((Nbound, 3), dtype=pos_dtype)
+    SH_vel = np.zeros((Ntype[iDM]+Ntype[istar]+Ntype[iBH], 3), dtype=vel_dtype)
+    #SH_IDs = np.zeros(Nbound, dtype=ids_dtype)
+    #SH_Star_IDs = np.array([], dtype=ids_dtype)
     if snapPotentials:
-      SH_pots = np.ones(Ntype[iDM]+Ntype[istar]+Ntype[iBH],
-                        dtype=snapshot['PartType4/Potentials'].dtype) * np.inf
+      SH_pots = np.ones(Ntype[iDM]+Ntype[istar]+Ntype[iBH], dtype=pot) * np.inf
 
     thalo_reproc += time.time() - start
 
@@ -519,9 +511,12 @@ def get_removed_clusters(snapshot, args, numthreads):
 
       start = time.time()
 
-      group = snapshot[f'PartType{istar}']
+      snapshot = h5py.File(snapfile, 'r')
+
       mask = All_HaloIndex['Stars'] == HaloIdx
       p_ind = np.arange(len(mask))[mask]
+
+      group = snapshot[f'PartType{istar}']
       GCs_Masses = load_physical_data(group, 'GCs_Masses', ascale, p_ind)
 
       # Does this subhalo have any clusters?
@@ -570,6 +565,8 @@ def get_removed_clusters(snapshot, args, numthreads):
  
           del p_ind
 
+      snapshot.close()
+
       thalo_io += time.time() - start
 
     # Does this subhalo have any clusters?
@@ -588,11 +585,10 @@ def get_removed_clusters(snapshot, args, numthreads):
  
     start = time.time()
 
-    #TODO rename? SH_snpIdx
     # Location of subhalo stars in full snapshot array
-    s_ind_all = Stars_SnapIndex[Stars_HaloIndex == HaloIdx]
+    SH_star_snapIdx = Stars_SnapIndex[Stars_HaloIndex == HaloIdx]
 
-    #clusters['dfTrackId'][s_ind] = subhaloes['TrackId'][isub]
+    clusters['TrackId'][SH_star_snapIdx] = subhaloes['TrackId'][isub]
  
     if snapPotentials:
       # Use particle snapshot potentials for centre of potential
@@ -602,19 +598,13 @@ def get_removed_clusters(snapshot, args, numthreads):
       print("COP from particle potentials: ",cofp)
       print("COP velocity from particle potentials: ",cofv)
 
-      cofp = subhaloes[isub]['CentreOfPotential']
-      cofv = subhaloes[isub]['CentreOfMassVelocity']
-
-      print("COP from SOAP: ", cofp)
-      print("COM velocity from SOAP: ", cofv)
+      print("COP from SOAP: ", subhaloes['CentreOfPotential'][isub])
+      print("COM velocity from SOAP: ", subhaloes['CentreOfMassVelocity'][isub])
 
     else:
-      #TODO
       # Use subhalo catalogue for centres
-      #cofp = subhaloes['ComovingMostBoundPosition'][isub] * ascale
-      #cofv = subhaloes['PhysicalMostBoundVelocity'][isub]
-      print('Not yet implemented')
-      exit(1)
+      cofp = subhaloes['CentreOfPotential'][isub]
+      cofv = subhaloes['CentreOfMassVelocity'][isub]
 
     del SH_pots
  
@@ -623,9 +613,8 @@ def get_removed_clusters(snapshot, args, numthreads):
     SH_vel -= cofv
     SH_radii = np.linalg.norm(SH_pos, axis=1)
 
-    #TODO rename? Stars_radii
     # Radii of the stars
-    s_radii = SH_radii[ SH_type == istar ]
+    SH_star_radii = SH_radii[ SH_type == istar ]
 
     thalo_cent += time.time() - start
     start = time.time()
@@ -652,10 +641,10 @@ def get_removed_clusters(snapshot, args, numthreads):
     SH_pos = SH_pos[sortIdx]
     #SH_IDs = SH_IDs[sortIdx]
 
-    sortIdx = s_radii.argsort()
+    sortIdx = SH_star_radii.argsort()
     GCs_Masses = GCs_Masses[sortIdx]
-    s_ind_all = s_ind_all[sortIdx]
-    s_radii = s_radii[sortIdx]
+    SH_star_snapIdx = SH_star_snapIdx[sortIdx]
+    SH_star_radii = SH_star_radii[sortIdx]
     #SH_Star_IDs = SH_Star_IDs[sortIdx]
 
     thalo_reproc += time.time() - start
@@ -693,21 +682,21 @@ def get_removed_clusters(snapshot, args, numthreads):
     for i in range(Nstar):
  
       # Too far, don't bother
-      if s_radii[i] > Rmax: continue
+      if SH_star_radii[i] > Rmax: continue
  
       # Does this particle have any clusters?
       if not (GCs_Masses[i] > 0).any(): continue
  
-      if s_radii[i] == 0:
+      if SH_star_radii[i] == 0:
         # Can stop here. t_df = 0 for r = 0
         for j in range( gc_shape[1] ):
           if GCs_Masses[i,j] > 0:
-            clusters['tfric'][s_ind_all[i], j] = 0.
+            clusters['tfric'][SH_star_snapIdx[i], j] = 0.
 
       else:
         do_stars[i] = True
 
-    print(f"{isub}/{Nhaloes}: Rmax={Rmax:.4g}, Mmax={Mtest/1.1:.4g}, Nstars={Nstar}, do_stars={np.sum(do_stars)}, too_far={np.sum(s_radii > Rmax)}") #TODO
+    print(f"{isub}/{Nhaloes}: Rmax={Rmax:.4g}, Mmax={Mtest/1.1:.4g}, Nstars={Nstar}, do_stars={np.sum(do_stars)}, too_far={np.sum(SH_star_radii > Rmax)}")
     sys.stdout.flush()
  
     thalo_reproc += time.time() - start
@@ -786,10 +775,10 @@ def get_removed_clusters(snapshot, args, numthreads):
         if part_GC_masses[j] <= 0: continue
 
         if Mgal == 0:
-          clusters['tfric'][s_ind_all[i], j] = 0.
+          clusters['tfric'][SH_star_snapIdx[i], j] = 0.
 
         else:
-          clusters['tfric'][s_ind_all[i], j] = get_df_timescale(
+          clusters['tfric'][SH_star_snapIdx[i], j] = get_df_timescale(
               Mgal, part_GC_masses[j], rcirc[i], epsilon[i], velStdv, const_G)
 
     thalo_df += time.time() - start
@@ -807,11 +796,11 @@ def get_removed_clusters(snapshot, args, numthreads):
 
     return
 
-  # Loop over all the subhaloes, sorting to do largest haloes first
-  #submask = subhaloes['NboundType'][:,istar] > 0
-  #nsort = subhaloes['Nbound'][submask].argsort()[::-1]
-  #do_halo = np.arange(len(subhaloes))[submask][nsort]
-  do_halo = np.arange(len(subhaloes))
+  # Loop over all the subhaloes with GCs
+  submask = subhaloes['Ngcs'] > 0
+  do_halo = np.arange(len(subhaloes['Ngcs']))[submask]
+  #nsort = subhaloes['Nbound'][submask].argsort()[::-1] # sorting to do largest haloes first
+  #do_halo = do_halo[nsort]
 
   print('Running DF...')
   sys.stdout.flush()
@@ -828,29 +817,32 @@ def get_removed_clusters(snapshot, args, numthreads):
 
   end_pardf = time.time()
 
+  snapshot = h5py.File(snapfile, 'r')
   group = snapshot[f'PartType{istar}']
   if 'Ages' in group:
     Stars_Ages = load_physical_data(group, 'Ages', ascale)
 
   else:
+    # SOAP doesn't use snipshots
+
     ## If snipshot doesn't have ages, use a future snapshot
 
     ## Check if using subdirs
     #hasSubdir = False
     #if (snapshot.filename ==
-    #    f'{SnapshotPath}/{SnapshotFileBase}_{snapnum:04}/' +
-    #    f'{SnapshotFileBase}_{snapnum:04}.hdf5'):
+    #    f'{args.path}/{args.basename}_{snapnum:04}/' +
+    #    f'{args.basename}_{snapnum:04}.hdf5'):
     #  hasSubdir = True
 
     ## Get the last snapshot index
     #lastsnap = -1 # dummy starter
     #if hasSubdir:
     #  # Check path for subdirectories
-    #  for snapdir in os.listdir(SnapshotPath):
+    #  for snapdir in os.listdir(args.path):
 
     #    # Match the filename base, and make sure is directory
-    #    if (fnmatch.fnmatch(snapdir, f'{SnapshotFileBase}_*') and
-    #        os.path.isdir(f'{SnapshotPath}/{snapdir}')):
+    #    if (fnmatch.fnmatch(snapdir, f'{args.basename}_*') and
+    #        os.path.isdir(f'{args.path}/{snapdir}')):
 
     #      snap = int(snapdir.split('_')[1])
     #      if snap > lastsnap:
@@ -858,11 +850,11 @@ def get_removed_clusters(snapshot, args, numthreads):
 
     #else:
     #  # Check path for hdf5 files
-    #  for snapfile in os.listdir(SnapshotPath):
+    #  for snapfile in os.listdir(args.path):
 
     #    # Match the filename, and make sure is a file
-    #    if (fnmatch.fnmatch(snapfile, f'{SnapshotFileBase}_*.hdf5') and
-    #        os.path.isfile(f'{SnapshotPath}/{snapfile}')):
+    #    if (fnmatch.fnmatch(snapfile, f'{args.basename}_*.hdf5') and
+    #        os.path.isfile(f'{args.path}/{snapfile}')):
 
     #      snap = int(snapfile.split('.hdf5')[0].split('_')[1])
     #      if snap > lastsnap:
@@ -872,10 +864,10 @@ def get_removed_clusters(snapshot, args, numthreads):
     #for isnap in range(snapnum+1, lastsnap+1):
 
     #  if hasSubdir:
-    #    snapfile = f'{SnapshotPath}/{SnapshotFileBase}_{isnap:04}/' + \
-    #               f'{SnapshotFileBase}_{isnap:04}.hdf5'
+    #    snapfile = f'{args.path}/{args.basename}_{isnap:04}/' + \
+    #               f'{args.basename}_{isnap:04}.hdf5'
     #  else:
-    #    snapfile = f'{SnapshotPath}/{SnapshotFileBase}_{isnap:04}.hdf5'
+    #    snapfile = f'{args.path}/{args.basename}_{isnap:04}.hdf5'
 
     #  nextsnap = h5py.File(snapfile, 'r')
 
@@ -922,6 +914,8 @@ def get_removed_clusters(snapshot, args, numthreads):
   group = snapshot[f'PartType{istar}']
   All_GCs_Masses = load_physical_data(group, 'GCs_Masses', ascale)
 
+  snapshot.close()
+
   # If dynamical friction timescale is shorter than cluster age then cluster 
   # is removed/considered disrupted
   # Assumes particle has been in the same halo the whole time. DF time will
@@ -952,17 +946,21 @@ def get_removed_clusters(snapshot, args, numthreads):
       
   return clusters
 
-def write_clusters(clusters, snapshot, output, snapnum):
+def write_clusters(clusters, args):
   '''
   Write dynamical friction data to HDF5 file
 
   Parameters
   ----------
   clusters : The clusters dictionary
-  snapshot : HDF5 snapshot file
-  output : Output path
-  snapnum : Snapshot number
+  args : argparse Namespace
   '''
+
+  output = args.output
+  snapnum = args.snapnum
+
+  snapfile = f"{args.path}/SOAP/{args.basename}_with_SOAP_membership_{args.snapnum:04}.hdf5"
+  snapshot = h5py.File(snapfile, 'r')
 
   # Open for writing
   f_df = h5py.File(f'{output}/df_timescale_{snapnum:04}.hdf5', 'w')
@@ -976,6 +974,7 @@ def write_clusters(clusters, snapshot, output, snapnum):
 
   if len(clusters['removed']) == 0:
     f_df.close()
+    snapshot.close()
     return
 
   # Age attributes need special handling, as they may not exist in snipshots
@@ -1027,13 +1026,14 @@ def write_clusters(clusters, snapshot, output, snapnum):
   ds.attrs['Value stored as physical'] = np.array([1])
   ds.attrs['Description'] = "Mass at time of dynamical friction removal"
 
-  #ds = group.create_dataset('GCs_DF_TrackId', data=clusters['dfTrackId'],
-  #    dtype='i4', compression="gzip")
-  #for key in snapshot['PartType4/ParticleIDs'].attrs.keys():
-  #  ds.attrs[key] = snapshot['PartType4/ParticleIDs'].attrs[key]
-  #ds.attrs['Description'] = "HBT+ TrackId of halo in which GC resides"
+  ds = group.create_dataset('GCs_DF_TrackId', data=clusters['TrackId'],
+      dtype='i4', compression="gzip")
+  for key in snapshot['PartType4/ParticleIDs'].attrs.keys():
+    ds.attrs[key] = snapshot['PartType4/ParticleIDs'].attrs[key]
+  ds.attrs['Description'] = "HBT+ TrackId of halo in which GC resides"
 
   f_df.close()
+  snapshot.close()
   return
 
 
@@ -1047,8 +1047,8 @@ if __name__ == "__main__":
     dest='path', default='.',
     help="Path to snapshot data (default '.')")
   parser.add_argument('--basename', action='store', type=str,
-    dest='basename', default='snapshot',
-    help="Snapshot basename (default 'snapshot')")
+    dest='basename', default='colibre',
+    help="Snapshot basename (default 'colibre')")
   parser.add_argument('--subpath', action='store', type=str,
     dest='subpath', default='.',
     help="Path to subhalo data (default '.')")
@@ -1061,13 +1061,13 @@ if __name__ == "__main__":
   parser.add_argument('--skipsnips', action='store_true',
     dest='skipSnips', default=False,
     help="Skip snipshot files?")
-  parser.add_argument('--loadall', action='store_true',
-    dest='loadall', default=False,
+  parser.add_argument('--partload', action='store_true',
+    dest='partload', default=False,
     help="Try and load all data at once to speed up I/O. Otherwise load "
-         "halo particles individually")
-  #parser.add_argument('--snappotentials', action='store_true',
-  #  dest='snapPotentials', default=False,
-  #  help="Use particle snapshot potentials for centre of potential?")
+         "halo particles individually (partial load)")
+  parser.add_argument('--snappotentials', action='store_true',
+    dest='snapPotentials', default=False,
+    help="Use particle snapshot potentials for centre of potential?")
   parser.add_argument('--ecc_nbaryon', action='store', type=int,
     dest='eccNbaryon', default=10000,
     help="Particle number to use only baryons for eccentricities "
@@ -1082,8 +1082,8 @@ if __name__ == "__main__":
   print('Subhalo path:', args.subpath)
   print('snapnum:', args.snapnum)
   print('Output path:', args.output)
-  print('Loadall:', args.loadall)
-  #print('Snap potentials:', args.snapPotentials)
+  print('Part load:', args.partload)
+  print('Snap potentials:', args.snapPotentials)
   sys.stdout.flush()
 
   # Track memory usage
@@ -1092,26 +1092,15 @@ if __name__ == "__main__":
   # Make the output directory if it doesn't exist yet
   os.system(f'mkdir -pv {args.output}')
 
-  # Load from snapshot. First check for a subdir
-  #snapfile = f'{args.path}/{args.basename}_{args.snapnum:04}/' + \
-  #           f'{args.basename}_{args.snapnum:04}.hdf5'
-
-  #if not os.path.isfile(snapfile):
-  #  snapfile = f'{args.path}/{args.basename}_{args.snapnum:04}.hdf5'
-
-  snapfile = f"{args.path}/SOAP/colibre_with_SOAP_membership_{args.snapnum:04}.hdf5"
-
-  soap_catalogue = f"{args.path}/SOAP/halo_properties_{args.snapnum:04}.hdf5"
+  snapfile = f"{args.path}/SOAP/{args.basename}_with_SOAP_membership_{args.snapnum:04}.hdf5"
 
   print('Loading snapshot from', snapfile)
   sys.stdout.flush()
-  snapshot = h5py.File(snapfile, 'r')
-
-  if args.skipSnips and \
-      (snapshot['Header'].attrs['SelectOutput'].decode() == 'Snipshot'):
-    print('Snipshot, exiting...')
-    snapshot.close()
-    exit()
+  with h5py.File(snapfile, 'r') as snapshot:
+    if args.skipSnips and \
+        (snapshot['Header'].attrs['SelectOutput'].decode() == 'Snipshot'):
+      print('Snipshot, exiting...')
+      exit()
 
   # Set maximum thread number
   numthreads = args.numthreads
@@ -1124,14 +1113,12 @@ if __name__ == "__main__":
 
   # Start the dynamical friction calculation and return list of removed GCs
   start = time.time()
-  clusters = get_removed_clusters(snapshot, args, numthreads)
+  clusters = get_removed_clusters(args, numthreads)
   print('Dynamical friction took %.5g mins' % ((time.time() - start)/60.))
 
   print(f'Writing output to {args.output}/df_timescale_{args.snapnum:04}.hdf5')
   sys.stdout.flush()
-  write_clusters(clusters, snapshot, args.output, args.snapnum)
-
-  snapshot.close()
+  write_clusters(clusters, args)
 
   current, peak = tracemalloc.get_traced_memory()
   print(f'Peak memory usage: {peak/1024.**3:.5g} GB')
