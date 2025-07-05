@@ -428,7 +428,7 @@ def get_removed_clusters(args, numthreads):
   sys.stdout.flush()
 
 
-  timing_haloes = np.zeros(len(subhaloes), dtype=np.float32)
+  timing_haloes = np.zeros(len(subhaloes['Nbound']), dtype=np.float32)
 
   def df_one_subhalo(isub):
     '''
@@ -601,13 +601,13 @@ def get_removed_clusters(args, numthreads):
       print("COP from SOAP: ", subhaloes['CentreOfPotential'][isub])
       print("COM velocity from SOAP: ", subhaloes['CentreOfMassVelocity'][isub])
 
+      del SH_pots
+ 
     else:
       # Use subhalo catalogue for centres
       cofp = subhaloes['CentreOfPotential'][isub]
       cofv = subhaloes['CentreOfMassVelocity'][isub]
 
-    del SH_pots
- 
     # centre positions and velocities on subhalo centre of potential
     SH_pos = centre_periodic_positions(SH_pos, cofp, boxsize)
     SH_vel -= cofv
