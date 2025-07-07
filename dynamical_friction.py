@@ -555,7 +555,17 @@ def get_removed_clusters(snapshot, args, numthreads):
     clusters['dfTrackId'][s_ind] = subhaloes['TrackId'][isub]
  
     # Does this subhalo have any clusters?
-    if np.sum(GCs_Masses[s_ind]) == 0: return
+    if np.sum(GCs_Masses[s_ind]) == 0:
+      end_halo = time.time()
+      with timing_lock:
+        timing['TotalHaloes'] += (end_halo - start_halo) / 60.
+        timing['Reprocessing'] += thalo_reproc / 60.
+        timing['I/O'] += thalo_io / 60.
+        timing['EnclosedMasses'] += thalo_menc / 60.
+        timing['Eccentricities'] += thalo_ecc / 60.
+        timing['DFCalculation'] += thalo_df / 60.
+        timing_haloes[isub] = (end_halo - start_halo) / 60.
+      return
 
     if snapPotentials:
       # Use particle snapshot potentials for centre of potential
@@ -645,11 +655,24 @@ def get_removed_clusters(snapshot, args, numthreads):
 
       else:
         do_stars[i] = True
+
+    print(f"{isub}/{Nhaloes}: Rmax={Rmax:.4g}, Mmax={Mtest/1.1:.4g}, Nstars={len(s_radii)}, do_stars={np.sum(do_stars)}, too_far={np.sum(s_radii > Rmax)}")
+    sys.stdout.flush()
  
     thalo_reproc += time.time() - start
     start = time.time()
  
-    if np.sum(do_stars) == 0: return
+    if np.sum(do_stars) == 0:
+      end_halo = time.time()
+      with timing_lock:
+        timing['TotalHaloes'] += (end_halo - start_halo) / 60.
+        timing['Reprocessing'] += thalo_reproc / 60.
+        timing['I/O'] += thalo_io / 60.
+        timing['EnclosedMasses'] += thalo_menc / 60.
+        timing['Eccentricities'] += thalo_ecc / 60.
+        timing['DFCalculation'] += thalo_df / 60.
+        timing_haloes[isub] = (end_halo - start_halo) / 60.
+      return
  
     # Outer component of potential, assuming spherical symmetry
     # -G int_r^inf dM(r')/r'
