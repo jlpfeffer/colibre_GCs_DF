@@ -6,7 +6,7 @@ import fnmatch
 from concurrent.futures import ThreadPoolExecutor
 from threading import Lock
 import tracemalloc
-#from HBTReader import HBTReader
+from HBTReader import HBTReader
 from scipy.special import erf
 
 # Min number of parts for velocity dispersion
@@ -193,7 +193,7 @@ def get_removed_clusters(args, numthreads):
   snapPotentials = args.snapPotentials
   eccNbaryon = args.eccNbaryon
 
-  snapfile = f"{args.path}/SOAP/{args.basename}_with_SOAP_membership_{args.snapnum:04}.hdf5"
+  snapfile = f"{args.path}/{args.basename}_with_SOAP_membership_{args.snapnum:04}.hdf5"
   snapshot = h5py.File(snapfile, 'r')
 
   # Set up a dictionary for the cluster properties
@@ -270,7 +270,7 @@ def get_removed_clusters(args, numthreads):
   Tmax = 2. * simTime
 
   # Get the subhaloes
-  soap_catalogue = f"{args.path}/SOAP/halo_properties_{args.snapnum:04}.hdf5"
+  soap_catalogue = f"{args.path}/halo_properties_{args.snapnum:04}.hdf5"
   print('Loading haloes from', soap_catalogue)
   sys.stdout.flush()
 
@@ -289,7 +289,8 @@ def get_removed_clusters(args, numthreads):
     subhaloes['CentreOfPotential'] = np.array(f['InputHalos/HaloCentre']) * ascale
 
     # Velocities stored in physical units 
-    subhaloes['CentreOfMassVelocity'] = np.array(f['BoundSubhalo/CentreOfMassVelocity'])
+    #subhaloes['CentreOfVelocity'] = np.array(f['BoundSubhalo/CentreOfMassVelocity'])
+    subhaloes['CentreOfVelocity'] = np.array(f['ExclusiveSphere/1kpc/CentreOfMassVelocity'])
 
   # Nothing to do if there's no bound subhaloes or subhaloes with stars
   if len(subhaloes['HaloCatalogueIndex']) > 0:
@@ -302,6 +303,17 @@ def get_removed_clusters(args, numthreads):
   if Nhaloes == 0:
     snapshot.close()
     return clusters
+
+  # Get the most bound particle velocities from HBT
+  if len(args.subpath) > 0:
+    hbt = HBTReader(args.subpath)
+    hbt_subhaloes = hbt.LoadSubhalos(snapnum)
+
+    subhaloes['CentreOfVelocity'] = \
+        hbt_subhaloes['PhysicalMostBoundVelocity'][ subhaloes['HaloCatalogueIndex'] ]
+
+    del hbt, hbt_subhaloes
+
 
   ##### Load snapshot particle data #####
 
@@ -415,7 +427,13 @@ def get_removed_clusters(args, numthreads):
 
   del has_gcs
 
-  Nhaloes = np.sum(subhaloes['Ngcs'] > 0)
+  # Loop over all the subhaloes with GCs
+  submask = subhaloes['Ngcs'] > 0
+  do_halo = np.arange(len(subhaloes['Ngcs']))[submask]
+  nsort = subhaloes['Nbound'][submask].argsort()[::-1] # sorting to do largest haloes first
+  do_halo = do_halo[nsort]
+
+  Nhaloes = len(do_halo)
   print(f"{Nhaloes} subhaloes with GCs")
 
   timing['I/O'] += (time.time() - start) / 60.
@@ -592,8 +610,7 @@ def get_removed_clusters(args, numthreads):
     if snapPotentials:
       # Use particle snapshot potentials for centre of potential
       cofp = SH_pos[ SH_pots.argmin() ]
-      #cofv = SH_vel[ SH_pots.argmin() ]
-      cofv = subhaloes['CentreOfMassVelocity'][isub]
+      cofv = SH_vel[ SH_pots.argmin() ]
 
       del SH_pots
  
@@ -705,7 +722,9 @@ def get_removed_clusters(args, numthreads):
       else:
         do_stars[i] = True
 
-    print(f"{isub}/{Nhaloes}: Rmax={Rmax:.4g}, Mmax={Mtest/1.1:.4g}, Nstars={Nstar}, do_stars={np.sum(do_stars)}, too_far={np.sum(SH_star_radii > Rmax)}")
+    print(f"{isub} ({np.abs(do_halo-isub).argmin()}/{Nhaloes}): Rmax={Rmax:.4g}, "
+          f"Mmax={Mtest/1.1:.4g}, Nstars={Nstar}, do_stars={np.sum(do_stars)}, "
+          f"too_far={np.sum(SH_star_radii > Rmax)}")
     sys.stdout.flush()
  
     thalo_reproc += time.time() - start
@@ -803,12 +822,6 @@ def get_removed_clusters(args, numthreads):
       timing_haloes[isub] = (end_halo - start_halo) / 60.
 
     return
-
-  # Loop over all the subhaloes with GCs
-  submask = subhaloes['Ngcs'] > 0
-  do_halo = np.arange(len(subhaloes['Ngcs']))[submask]
-  #nsort = subhaloes['Nbound'][submask].argsort()[::-1] # sorting to do largest haloes first
-  #do_halo = do_halo[nsort]
 
   print('Running DF...')
   sys.stdout.flush()
@@ -967,7 +980,7 @@ def write_clusters(clusters, args):
   output = args.output
   snapnum = args.snapnum
 
-  snapfile = f"{args.path}/SOAP/{args.basename}_with_SOAP_membership_{args.snapnum:04}.hdf5"
+  snapfile = f"{args.path}/{args.basename}_with_SOAP_membership_{args.snapnum:04}.hdf5"
   snapshot = h5py.File(snapfile, 'r')
 
   # Open for writing
@@ -1058,8 +1071,8 @@ if __name__ == "__main__":
     dest='basename', default='colibre',
     help="Snapshot basename (default 'colibre')")
   parser.add_argument('--subpath', action='store', type=str,
-    dest='subpath', default='.',
-    help="Path to subhalo data (default '.')")
+    dest='subpath', default='',
+    help="Path to HBT subhalo data (default '')")
   parser.add_argument('--output', action='store', type=str,
     dest='output', default='dynamical_friction',
     help="Output path (default 'dynamical_friction')")
@@ -1087,7 +1100,7 @@ if __name__ == "__main__":
   print('pid:', os.getpid())
   print('Snapshot path:', args.path)
   print('basename:', args.basename)
-  print('Subhalo path:', args.subpath)
+  print('HBT path:', args.subpath)
   print('snapnum:', args.snapnum)
   print('Output path:', args.output)
   print('Partial loading:', args.partialload)
@@ -1100,7 +1113,7 @@ if __name__ == "__main__":
   # Make the output directory if it doesn't exist yet
   os.system(f'mkdir -pv {args.output}')
 
-  snapfile = f"{args.path}/SOAP/{args.basename}_with_SOAP_membership_{args.snapnum:04}.hdf5"
+  snapfile = f"{args.path}/{args.basename}_with_SOAP_membership_{args.snapnum:04}.hdf5"
 
   print('Loading snapshot from', snapfile)
   sys.stdout.flush()
