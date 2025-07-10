@@ -617,7 +617,7 @@ def get_removed_clusters(args, numthreads):
     else:
       # Use subhalo catalogue for centres
       cofp = subhaloes['CentreOfPotential'][isub]
-      cofv = subhaloes['CentreOfMassVelocity'][isub]
+      cofv = subhaloes['CentreOfVelocity'][isub]
 
     # centre positions and velocities on subhalo centre of potential
     SH_pos = centre_periodic_positions(SH_pos, cofp, boxsize)
